@@ -17,7 +17,7 @@ On the default branch, [GitHub Actions](../.github/workflows/build-image.yml)
 polls Ubiquiti's `release` channel every six hours. When both Linux installers
 report the same new version, native amd64 and arm64 runners build their images.
 Each runner boots the Compose stack with MongoDB 8.0 and checks the UniFi OS
-HTTPS endpoint, UniFi Network HTTPS status, and PostgreSQL readiness. The publish
+HTTPS endpoint, the UniFi Network service's readiness signal, and PostgreSQL. The publish
 job uses the tested images' digests to create the version and `latest` indexes.
 An existing `latest` version is never downgraded. A scheduled run skips a version
 already published. A push that changes build files on `main` can rebuild the

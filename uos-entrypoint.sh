@@ -205,31 +205,56 @@ case "${UOS_POSTGRES_TCP:-false}" in
     *) log "ERROR: UOS_POSTGRES_TCP must be true or false"; exit 1 ;;
 esac
 
-if ! PG_CLUSTERS=$(pg_lsclusters --no-header); then
-    log "ERROR: Could not discover PostgreSQL clusters"
-    exit 1
-fi
-while read -r version cluster _; do
-    [ -n "$version" ] || continue
-    if ! pg_conftool "$version" "$cluster" set listen_addresses "$PG_LISTEN"; then
-        log "ERROR: Could not configure PostgreSQL $version/$cluster"
-        exit 1
-    fi
-    PG_HBA="/etc/postgresql/$version/$cluster/pg_hba.conf"
-    if ! sed -i '/^# uos-container-tcp$/,+2d' "$PG_HBA"; then
-        log "ERROR: Could not update PostgreSQL host authentication"
-        exit 1
-    fi
-    if [ "$PG_LISTEN" = '*' ]; then
-        # Put password rules first so a later upstream trust rule cannot win.
-        if ! sed -i '1i\# uos-container-tcp\nhost all all 0.0.0.0/0 scram-sha-256\nhost all all ::/0 scram-sha-256' "$PG_HBA"; then
-            log "ERROR: Could not require PostgreSQL TCP authentication"
-            exit 1
+configure_postgres() {
+    local version cluster hba
+    while read -r version cluster _; do
+        [ -n "$version" ] || continue
+        if ! pg_conftool "$version" "$cluster" set listen_addresses "$PG_LISTEN"; then
+            log "ERROR: Could not configure PostgreSQL $version/$cluster"
+            return 1
         fi
+        hba="/etc/postgresql/$version/$cluster/pg_hba.conf"
+        if ! sed -i '/^# uos-container-tcp$/,+2d' "$hba"; then
+            log "ERROR: Could not update PostgreSQL host authentication"
+            return 1
+        fi
+        if [ "$PG_LISTEN" = '*' ]; then
+            # Put password rules first so a later upstream trust rule cannot win.
+            if ! sed -i '1i\# uos-container-tcp\nhost all all 0.0.0.0/0 scram-sha-256\nhost all all ::/0 scram-sha-256' "$hba"; then
+                log "ERROR: Could not require PostgreSQL TCP authentication"
+                return 1
+            fi
+        fi
+        if [ "$1" = restart ]; then
+            # An activating or active cluster may have read its original config.
+            if ! systemctl try-restart "postgresql@$version-$cluster.service"; then
+                log "ERROR: Could not reload PostgreSQL $version/$cluster"
+                return 1
+            fi
+        fi
+    done
+    if [ "$PG_LISTEN" = '*' ]; then
+        log "PostgreSQL TCP enabled with SCRAM authentication"
     fi
-done <<< "$PG_CLUSTERS"
-if [ "$PG_LISTEN" = '*' ]; then
-    log "PostgreSQL TCP enabled with SCRAM authentication"
+}
+
+PG_CLUSTERS=$(pg_lsclusters --no-header 2>/dev/null)
+if [ -n "$PG_CLUSTERS" ]; then
+    configure_postgres startup <<< "$PG_CLUSTERS" || exit 1
+elif [ "$PG_LISTEN" = '*' ]; then
+    # Some installers create the cluster during their first systemd boot.
+    # PostgreSQL's default loopback listener remains in place until then.
+    (
+        for attempt in {1..120}; do
+            PG_CLUSTERS=$(pg_lsclusters --no-header 2>/dev/null)
+            if [ -n "$PG_CLUSTERS" ] && systemctl show-environment >/dev/null 2>&1; then
+                configure_postgres restart <<< "$PG_CLUSTERS"
+                exit $?
+            fi
+            sleep 2
+        done
+        log "ERROR: PostgreSQL cluster did not initialize for TCP access"
+    ) &
 fi
 
 # ---------------------------------------------------------------------------
