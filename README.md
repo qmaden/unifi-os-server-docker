@@ -1,75 +1,34 @@
 # UniFi OS Server in Docker
 
 Run UniFi OS Server with Docker Compose using the published image from
-`ghcr.io/unihosted/unifi-os-server-docker`. This project packages the image from
+`ghcr.io/qmaden/unifi-os-server-docker`. This project packages the image from
 Ubiquiti's installer for Docker, with persistent storage and readable service logs.
 
 ## Quick Start
 
-Save the Compose configuration below as `docker-compose.yaml`. Set `UOS_SYSTEM_IP`
-to the host IP your UniFi devices can reach, then run `docker compose up -d`.
-Open `https://localhost:11443` on the Docker host once the container is ready.
-The example uses a separate MongoDB container; [bundled MongoDB is also available](#whats-inside).
+Clone the repository and run the included Compose file on a Linux Docker host.
+Set `UOS_SYSTEM_IP` to an address your UniFi devices can reach.
 
-```yaml
-services:
-  unifi-os-server:
-    container_name: unifi-os-server
-    image: ghcr.io/unihosted/unifi-os-server-docker:latest
-    cgroup: host
-    restart: unless-stopped
-    cap_add:
-      - NET_RAW
-      - NET_ADMIN
-    ports:
-      - "8080:8080" # HTTP inform / redirect
-      - "8443:8443" # UniFi Controller API
-      - "8444:8444" # Secure Portal for Hotspot
-      - "8880-8882:8880-8882" # Hotspot portal redirection (HTTP)
-      - "10003:10003/udp" # UniFi discovery (Only needed on local network)
-      - "11443:443" # UniFi Web UI (HTTPS)
-      - "3478:3478/udp" # STUN used for device poking
-      - "5514:5514/udp" # Syslog
-      - "6789:6789" # Speed test
-      - "127.0.0.1:5432:5432" # PostgreSQL (localhost only)
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-      - "host.containers.internal:host-gateway"
-    volumes:
-      - /sys/fs/cgroup:/sys/fs/cgroup:rw
-      - ./docker/uos:/var/lib/uosserver
-      - ./docker/uos:/var/lib/unifi
-      - ./docker/data/:/data
-    tmpfs:
-      - /run:exec
-      - /run/lock
-      - /tmp:exec
-      - /var/log/journal
-      - /var/opt/unifi/tmp:size=64m
-      - /data/unifi-core/config/http
-    networks:
-      - unifi-os-server-network
-    depends_on:
-      - unifi-os-server-mongodb
-    environment:
-      TZ: Europe/Amsterdam
-      UOS_SYSTEM_IP: "127.0.0.1"
-      UOS_LOG_FORMAT: "text" # Default; set to "json" for structured log collectors.
-      MONGO_INTERNAL: "false" # Defaults to false → uses the external MongoDB service below.
-      # Set to "true" and remove the unifi-os-server-mongodb service + depends_on
-      # to let the UniFi Network App run its own mongod (port 27117).
-
-  unifi-os-server-mongodb:
-    container_name: unifi-os-server-mongodb
-    image: mongo:4.4
-    networks:
-      - unifi-os-server-network
-    volumes:
-      - ./docker/mongodb:/data/db
-
-networks:
-  unifi-os-server-network:
+```sh
+git clone https://github.com/qmaden/unifi-os-server-docker.git
+cd unifi-os-server-docker
+UOS_SYSTEM_IP=192.168.1.10 docker compose up -d --pull always
 ```
+
+Open `https://localhost:11443` on the Docker host. Compose defaults to the fork's
+stable `latest` tag and waits for its MongoDB 8.0 sidecar to respond before
+starting UniFi. Set `UNIFI_IMAGE` in `.env` to pin an image tag or digest.
+Authenticate Docker to GHCR if the package is private.
+
+The workflow checks Ubiquiti for stable releases every six hours. When an image
+is available, update an existing deployment with
+`docker compose up -d --pull always unifi-os-server`. Keep `UOS_SYSTEM_IP` in
+`.env` so Compose uses the same address on future runs.
+
+**Upgrading an existing stack?** Read the
+[MongoDB migration instructions](docs/building.md#mongodb-data) before
+updating Compose. [PostgreSQL TCP access](docs/building.md#postgresql-tcp-access)
+is optional and requires a database password.
 
 ## What's inside
 
@@ -99,7 +58,7 @@ docker logs -f unifi-os-server
 
 ```text
 2026-11-03T07:24:15.277999Z [postgresql] INFO: Started PostgreSQL Cluster 14-main.
-2026-11-03T07:24:15.308Z [uos-entrypoint] INFO: PostgreSQL: exposed on port 5432
+2026-11-03T07:24:15.308Z [uos-entrypoint] INFO: Starting systemd init
 ```
 
 For a log collector, set `UOS_LOG_FORMAT: "json"` in the service's environment
@@ -130,9 +89,8 @@ for verification and package update caveats.
 
 ## About this project
 
-At UniHosted, we wanted to run UniFi OS Server alongside our other Docker
-services. We package the OCI image from Ubiquiti's installer so it can run with
-Docker Compose, and share the build process in this repository.
+This fork builds on [UniHosted's Docker packaging](https://github.com/unihosted/unifi-os-server-docker).
+It packages the image from Ubiquiti's installer for Docker Compose.
 
 For contributors, the [build and maintenance notes](docs/building.md) cover
 supported versions, publishing, and the included Node.js security patch. The

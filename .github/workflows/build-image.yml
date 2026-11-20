@@ -1,226 +1,183 @@
 name: Build and publish UniFi OS Server Docker image
 
 on:
+  schedule:
+    - cron: '23 */6 * * *'
   workflow_dispatch:
     inputs:
-      installer_url_amd64:
-        description: "fw-download.ubnt.com URL for the linux-x64 installer"
-        required: false
-        default: ""
-      installer_url_arm64:
-        description: "fw-download.ubnt.com URL for the linux-arm64 installer"
-        required: false
-        default: ""
       uos_server_version:
-        description: "UniFi OS Server version, or all to rebuild every supported version"
-        required: true
-        default: "all"
+        description: "latest, all, a stable version, or an explicit version with custom installers"
+        default: latest
+      installer_url_amd64:
+        description: "Optional Ubiquiti Linux x64 installer URL for a preview"
+      installer_sha256_amd64:
+        description: "Vendor SHA-256 for the custom x64 installer"
+      installer_url_arm64:
+        description: "Optional Ubiquiti Linux arm64 installer URL for a preview"
+      installer_sha256_arm64:
+        description: "Vendor SHA-256 for the custom arm64 installer"
       image_name:
-        description: "Final image name (without registry). Example: unifi-os-server-docker"
-        required: true
-        default: "unifi-os-server-docker"
+        description: "GHCR image name"
+        default: unifi-os-server-docker
       push:
-        description: "Push to GHCR (true/false)"
-        required: true
-        default: "true"
-
+        description: "Publish the build to GHCR"
+        type: boolean
+        default: true
   push:
+    branches: [main]
+    paths: &build_paths
+      - .github/workflows/build-image.yml
+      - scripts/**
+      - Dockerfile
+      - .dockerignore
+      - docker-compose.yaml
+      - uos-entrypoint.sh
+      - uos-logs.cjs
     tags:
-      - "v[0-9]+.[0-9]+.[0-9]+"
-      - "v[0-9]+.[0-9]+.[0-9]+-*"
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+      - 'v[0-9]+.[0-9]+.[0-9]+-*'
+  pull_request:
+    paths: *build_paths
 
 permissions:
   contents: read
-  packages: write
+
+concurrency:
+  group: unifi-images-${{ github.event_name == 'pull_request' && github.ref || 'publish' }}
+  cancel-in-progress: false
 
 env:
-  REGISTRY: ghcr.io
+  PUBLISH: ${{ github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || inputs.push) }}
 
 jobs:
-  matrix:
-    runs-on: ubuntu-latest
+  plan:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: read
     outputs:
-      include: ${{ steps.set-matrix.outputs.include }}
-      latest_version: ${{ steps.set-matrix.outputs.latest_version }}
+      matrix: ${{ steps.resolve.outputs.matrix }}
+      image: ${{ steps.resolve.outputs.image }}
+      latest: ${{ steps.resolve.outputs.latest }}
+      build: ${{ steps.current.outputs.build || 'true' }}
     steps:
-      - name: Build platform matrix
-        id: set-matrix
-        shell: bash
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Resolve version and installer digests
+        id: resolve
         env:
-          REQUESTED_VERSION: ${{ inputs.uos_server_version || 'all' }}
-          CUSTOM_URL_AMD64: ${{ inputs.installer_url_amd64 || '' }}
-          CUSTOM_URL_ARM64: ${{ inputs.installer_url_arm64 || '' }}
-        run: |
-          set -euo pipefail
-
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            VERSION="${GITHUB_REF#refs/tags/v}"
-          else
-            VERSION="$REQUESTED_VERSION"
-          fi
-
-          declare -A VERSION_URLS_AMD64=(
-            ["4.3.6"]="https://fw-download.ubnt.com/data/unifi-os-server/2f3a-linux-x64-4.3.6-be3b4ae0-6bcd-435d-b893-e93da668b9d0.6-x64"
-            ["5.0.6"]="https://fw-download.ubnt.com/data/unifi-os-server/1856-linux-x64-5.0.6-33f4990f-6c68-4e72-9d9c-477496c22450.6-x64"
-            ["5.1.15"]="https://fw-download.ubnt.com/data/unifi-os-server/24e0-linux-x64-5.1.15-926621de-c9d7-48cd-8921-a0ff3eebd3f4.15-x64"
-            ["5.1.19"]="https://fw-download.ubnt.com/data/unifi-os-server/b828-linux-x64-5.1.19-e38d0b0e-b462-403d-9861-f57f25772106.19-x64"
-            ["5.1.21"]="https://fw-download.ubnt.com/data/unifi-os-server/f5e2-linux-x64-5.1.21-a400c9c6-8328-4634-b223-ebfcf742720a.21-x64"
-            ["5.1.37"]="https://fw-download.ubnt.com/data/unifi-os-server/9aee-linux-x64-5.1.37-a88d909c-2ac0-43f8-bb22-2bff3b673cbb.37-x64"
-            ["5.1.40"]="https://fw-download.ubnt.com/data/unifi-os-server/0e7e-linux-x64-5.1.40-149c6209-9218-4925-86d2-227b6b92f94d.40-x64"
-            ["5.1.42"]="https://fw-download.ubnt.com/data/unifi-os-server/5172-linux-x64-5.1.42-12e9e3cf-8f8b-4e54-928c-76b80a10c8a4.42-x64"
-          )
-          declare -A VERSION_URLS_ARM64=(
-            ["5.0.6"]="https://fw-download.ubnt.com/data/unifi-os-server/df5b-linux-arm64-5.0.6-f35e944c-f4b6-4190-93a8-be61b96c58f4.6-arm64"
-            ["5.1.15"]="https://fw-download.ubnt.com/data/unifi-os-server/adc4-linux-arm64-5.1.15-53ab1f2c-4cd5-4a5f-b750-d1aa35679b4f.15-arm64"
-            ["5.1.19"]="https://fw-download.ubnt.com/data/unifi-os-server/e027-linux-arm64-5.1.19-ebdd998e-306a-4880-af41-2bdc50e91e70.19-arm64"
-            ["5.1.21"]="https://fw-download.ubnt.com/data/unifi-os-server/162a-linux-arm64-5.1.21-c2775845-975c-453d-88f4-f9061329b27e.21-arm64"
-            ["5.1.37"]="https://fw-download.ubnt.com/data/unifi-os-server/e060-linux-arm64-5.1.37-eafe439e-ca8f-4aeb-bd82-85d2edf345ff.37-arm64"
-            ["5.1.40"]="https://fw-download.ubnt.com/data/unifi-os-server/e9d4-linux-arm64-5.1.40-b56d3f74-e1eb-454d-a8e7-6d7ccf8293c8.40-arm64"
-            ["5.1.42"]="https://fw-download.ubnt.com/data/unifi-os-server/f730-linux-arm64-5.1.42-d2bca8bd-d6fc-4d20-99e5-b78235843c2f.42-arm64"
-          )
-
-          if [[ "$VERSION" == all ]]; then
-            if [[ -n "$CUSTOM_URL_AMD64" || -n "$CUSTOM_URL_ARM64" ]]; then
-              echo "Custom installer URLs require a single explicit version" >&2
-              exit 1
-            fi
-            mapfile -t VERSIONS < <(printf '%s\n' "${!VERSION_URLS_AMD64[@]}" "${!VERSION_URLS_ARM64[@]}" | sort -Vu)
-          else
-            VERSIONS=("$VERSION")
-          fi
-
-          INCLUDES="[]"
-          for VERSION in "${VERSIONS[@]}"; do
-            URL_AMD64="${CUSTOM_URL_AMD64:-${VERSION_URLS_AMD64[$VERSION]:-}}"
-            URL_ARM64="${CUSTOM_URL_ARM64:-${VERSION_URLS_ARM64[$VERSION]:-}}"
-            if [[ -z "$URL_AMD64" && -z "$URL_ARM64" ]]; then
-              echo "No installer URLs configured for $VERSION" >&2
-              exit 1
-            fi
-            if [[ -n "$URL_AMD64" ]]; then
-              INCLUDES=$(echo "$INCLUDES" | jq -c --arg v "$VERSION" --arg u "$URL_AMD64" \
-                '. + [{"version": $v, "platform": "linux/amd64", "arch_suffix": "amd64", "installer_url": $u}]')
-            fi
-            if [[ -n "$URL_ARM64" ]]; then
-              INCLUDES=$(echo "$INCLUDES" | jq -c --arg v "$VERSION" --arg u "$URL_ARM64" \
-                '. + [{"version": $v, "platform": "linux/arm64", "arch_suffix": "arm64", "installer_url": $u}]')
-            fi
-          done
-
-          {
-            echo "include=$INCLUDES"
-            echo "latest_version=${VERSIONS[-1]}"
-          } >> "$GITHUB_OUTPUT"
-          echo "$INCLUDES" | jq -r '.[] | "Building \(.version) for \(.platform)"'
-
-  build:
-    needs: matrix
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        include: ${{ fromJson(needs.matrix.outputs.include) }}
-      fail-fast: false
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set variables
-        id: vars
-        shell: bash
-        run: |
-          set -euo pipefail
-          IMAGE_NAME="${{ inputs.image_name || 'unifi-os-server-docker' }}"
-          OWNER_LC="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
-          GHCR_IMAGE="${{ env.REGISTRY }}/${OWNER_LC}/${IMAGE_NAME}"
-          PUSH="${{ inputs.push || 'true' }}"
-
-          echo "ghcr_image=$GHCR_IMAGE" >> "$GITHUB_OUTPUT"
-          echo "push=$PUSH" >> "$GITHUB_OUTPUT"
-
-      - name: Login to GHCR
-        if: steps.vars.outputs.push == 'true'
+          REQUESTED_VERSION: ${{ inputs.uos_server_version || 'latest' }}
+          IMAGE_NAME: ${{ inputs.image_name || 'unifi-os-server-docker' }}
+          INSTALLER_URL_AMD64: ${{ inputs.installer_url_amd64 }}
+          INSTALLER_URL_ARM64: ${{ inputs.installer_url_arm64 }}
+          INSTALLER_SHA256_AMD64: ${{ inputs.installer_sha256_amd64 }}
+          INSTALLER_SHA256_ARM64: ${{ inputs.installer_sha256_arm64 }}
+        run: python3 scripts/resolve-release.py
+      - name: Sign in to GHCR for stable version check
+        if: env.PUBLISH == 'true' && steps.resolve.outputs.latest != ''
         uses: docker/login-action@v3
         with:
-          registry: ${{ env.REGISTRY }}
+          registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Check published stable version
+        if: env.PUBLISH == 'true' && steps.resolve.outputs.latest != ''
+        id: current
+        env:
+          IMAGE: ${{ steps.resolve.outputs.image }}
+          CANDIDATE: ${{ steps.resolve.outputs.latest }}
+        run: bash scripts/check-promotion.sh
 
-      - name: Set up QEMU
-        if: matrix.platform != 'linux/amd64'
-        uses: docker/setup-qemu-action@v3
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build and push (${{ matrix.platform }})
+  build:
+    needs: plan
+    if: needs.plan.outputs.build == 'true'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@v3
+      - name: Build image for native runner
         uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: ${{ matrix.platform }}
-          push: ${{ steps.vars.outputs.push == 'true' }}
-          tags: |
-            ${{ steps.vars.outputs.ghcr_image }}:${{ matrix.version }}-${{ matrix.arch_suffix }}
-          build-args: |
-            INSTALLER_URL_AMD64=${{ matrix.installer_url }}
-            INSTALLER_URL_ARM64=${{ matrix.installer_url }}
-            UOS_SERVER_VERSION=${{ matrix.version }}
+          load: true
           provenance: false
-
-  manifest:
-    needs: [matrix, build]
-    runs-on: ubuntu-latest
-    if: ${{ inputs.push != 'false' }}
-    steps:
-      - name: Set variables
-        id: vars
-        shell: bash
-        run: |
-          set -euo pipefail
-          IMAGE_NAME="${{ inputs.image_name || 'unifi-os-server-docker' }}"
-          OWNER_LC="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
-          echo "ghcr_image=${{ env.REGISTRY }}/${OWNER_LC}/${IMAGE_NAME}" >> "$GITHUB_OUTPUT"
-
-      - name: Login to GHCR
+          platforms: linux/${{ matrix.arch }}
+          tags: unifi-os-server:smoke-test
+          build-args: |
+            INSTALLER_URL_AMD64=${{ matrix.url }}
+            INSTALLER_URL_ARM64=${{ matrix.url }}
+            INSTALLER_SHA256_AMD64=${{ matrix.sha256 }}
+            INSTALLER_SHA256_ARM64=${{ matrix.sha256 }}
+            UOS_SERVER_VERSION=${{ matrix.version }}
+            UOS_SOURCE=https://github.com/${{ github.repository }}
+      - name: Boot and check UniFi services
+        run: bash scripts/smoke-test.sh unifi-os-server:smoke-test
+      - name: Sign in to GHCR
+        if: env.PUBLISH == 'true'
         uses: docker/login-action@v3
         with:
-          registry: ${{ env.REGISTRY }}
+          registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Create multi-arch manifest
-        shell: bash
+      - name: Push tested image and record its digest
+        if: env.PUBLISH == 'true'
         env:
-          LATEST_VERSION: ${{ needs.matrix.outputs.latest_version }}
+          IMAGE: ${{ needs.plan.outputs.image }}
+          TAG: ${{ matrix.tag }}
+          ARCH: ${{ matrix.arch }}
         run: |
           set -euo pipefail
-          IMAGE="${{ steps.vars.outputs.ghcr_image }}"
-          INCLUDE='${{ needs.matrix.outputs.include }}'
+          ref="$IMAGE:build-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$TAG-$ARCH"
+          docker tag unifi-os-server:smoke-test "$ref"
+          docker push "$ref" | tee push.log
+          digest=$(sed -nE 's/.*digest: (sha256:[[:xdigit:]]{64}) .*/\1/p' push.log)
+          [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
+          jq -n --arg tag "$TAG" --arg arch "$ARCH" --arg digest "$digest" \
+            '{tag: $tag, arch: $arch, digest: $digest}' > "$TAG-$ARCH.json"
+      - name: Save tested image digest
+        if: env.PUBLISH == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.tag }}-${{ matrix.arch }}
+          path: ${{ matrix.tag }}-${{ matrix.arch }}.json
+          if-no-files-found: error
+          overwrite: true
 
-          VERSIONS=$(echo "$INCLUDE" | jq -r '.[].version' | sort -u)
-          for VERSION in $VERSIONS; do
-            mapfile -t SOURCES < <(echo "$INCLUDE" | jq -r --arg v "$VERSION" --arg image "$IMAGE" \
-              '.[] | select(.version == $v) | "\($image):\($v)-\(.arch_suffix)"')
-            TAGS=(-t "${IMAGE}:${VERSION}")
-            if [[ "$VERSION" == "$LATEST_VERSION" ]]; then
-              TAGS+=(-t "${IMAGE}:latest")
-            fi
-
-            echo "Creating manifest ${IMAGE}:${VERSION} from:"
-            printf '%s\n' "${SOURCES[@]}"
-
-            docker buildx imagetools create \
-              "${TAGS[@]}" "${SOURCES[@]}"
-          done
-
-      - name: Summary
-        shell: bash
-        run: |
-          IMAGE="${{ steps.vars.outputs.ghcr_image }}"
-          INCLUDE='${{ needs.matrix.outputs.include }}'
-          {
-            echo "### Published"
-            echo "$INCLUDE" | jq -r --arg image "$IMAGE" \
-              'group_by(.version)[] | "- `\($image):\(.[0].version)` (\(map(.platform) | join(", ")))"'
-            echo "- \`${IMAGE}:latest\` → ${{ needs.matrix.outputs.latest_version }}"
-          } >> "$GITHUB_STEP_SUMMARY"
+  publish:
+    needs: [plan, build]
+    if: github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || inputs.push)
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: digest-*
+          path: digests
+          merge-multiple: true
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish version tags and promote the tested stable version
+        env:
+          IMAGE: ${{ needs.plan.outputs.image }}
+          LATEST: ${{ needs.plan.outputs.latest }}
+        run: bash scripts/publish-manifests.sh digests

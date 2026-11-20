@@ -13,7 +13,7 @@ Human-readable text is the default (`UOS_LOG_FORMAT=text`). View it with
 
 ```text
 2026-11-03T07:24:15.277999Z [postgresql] INFO: Started PostgreSQL Cluster 14-main.
-2026-11-03T07:24:15.308Z [uos-entrypoint] INFO: PostgreSQL: exposed on port 5432
+2026-11-03T07:24:15.308Z [uos-entrypoint] INFO: Starting systemd init
 ```
 
 For structured log collectors, opt into JSON in your Compose environment:
@@ -81,13 +81,12 @@ Log collectors must decode the JSON to use these fields.
   are suppressed only for those identified MongoDB emitters; warnings, errors,
   and other diagnostics remain. Records without recognized system service
   attribution are excluded; application-supplied identifiers cannot opt in.
-- **PostgreSQL file:** also follows the bundled cluster's
-  `/var/log/postgresql/postgresql-14-main.log`, including delayed creation,
+- **PostgreSQL file:** discovers cluster log paths with `pg_lsclusters`
+  and follows each file, including delayed creation,
   rename-and-create rotation, and detected truncation. The current file is read
   from the beginning on startup, so a container restart can replay retained
   PostgreSQL logs. Each physical file line is a record, including SQL continuation
-  lines. Custom PostgreSQL log paths and other application log files are not
-  collected by this forwarder; they need a separate file source.
+  lines. Other application log files need a separate file source.
 - **Recovery:** failed journal readers restart after the last emitted cursor,
   falling back to startup history if that reader exits without making progress;
   failed file readers replay the current file. If the forwarder itself crashes,
