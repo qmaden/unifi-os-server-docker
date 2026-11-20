@@ -2,6 +2,18 @@
 set -euo pipefail
 
 manifests=$(jq -es 'if length > 0 then . else error("missing image digests") end' "$1"/*.json)
+if [[ -n "$LATEST" ]]; then
+    jq -e --arg latest "$LATEST" '
+        map(select(.tag == $latest) | .arch) | sort == ["amd64", "arm64"]
+    ' >/dev/null <<< "$manifests"
+    # Recheck with the package writer's credentials before moving any tags.
+    decision=$(mktemp)
+    trap 'rm -f "$decision"' EXIT
+    CANDIDATE="$LATEST" GITHUB_OUTPUT="$decision" bash "$(dirname "$0")/check-promotion.sh"
+    if grep -qx 'build=false' "$decision"; then
+        exit 0
+    fi
+fi
 while IFS= read -r tag; do
     entries=$(jq -c --arg tag "$tag" '[.[] | select(.tag == $tag)]' <<< "$manifests")
     sources=()
@@ -12,12 +24,12 @@ while IFS= read -r tag; do
         docker buildx imagetools create --prefer-index=false -t "$IMAGE:$tag-$arch" "$source"
         sources+=("$source")
     done < <(jq -r '.[] | [.arch, .digest] | @tsv' <<< "$entries")
-    version=$(jq -er '.[0].version' <<< "$entries")
-    annotation="index:org.opencontainers.image.version=$version"
-    docker buildx imagetools create --annotation "$annotation" -t "$IMAGE:$tag" "${sources[@]}"
+    docker buildx imagetools create -t "$IMAGE:$tag" "${sources[@]}"
     if [[ -n "$LATEST" && "$tag" == "$LATEST" ]]; then
-        jq -e 'map(.arch) | sort == ["amd64", "arm64"]' >/dev/null <<< "$entries"
-        docker buildx imagetools create --annotation "$annotation" -t "$IMAGE:latest" "${sources[@]}"
+        docker buildx imagetools inspect --raw "$IMAGE:$tag" |
+            jq -e '[.manifests[] | select(.platform.os == "linux") | .platform.architecture]
+                | sort == ["amd64", "arm64"]' >/dev/null
+        docker buildx imagetools create -t "$IMAGE:latest" "${sources[@]}"
     fi
     printf '%s\n' "- \`$IMAGE:$tag\`" >> "$GITHUB_STEP_SUMMARY"
 done < <(jq -r 'map(.tag) | unique[]' <<< "$manifests")

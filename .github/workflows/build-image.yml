@@ -134,7 +134,6 @@ jobs:
         if: env.PUBLISH == 'true'
         env:
           IMAGE: ${{ needs.plan.outputs.image }}
-          VERSION: ${{ matrix.version }}
           TAG: ${{ matrix.tag }}
           ARCH: ${{ matrix.arch }}
         run: |
@@ -144,8 +143,8 @@ jobs:
           docker push "$ref" | tee push.log
           digest=$(sed -nE 's/.*digest: (sha256:[[:xdigit:]]{64}) .*/\1/p' push.log)
           [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
-          jq -n --arg tag "$TAG" --arg version "$VERSION" --arg arch "$ARCH" --arg digest "$digest" \
-            '{tag: $tag, version: $version, arch: $arch, digest: $digest}' > "$TAG-$ARCH.json"
+          jq -n --arg tag "$TAG" --arg arch "$ARCH" --arg digest "$digest" \
+            '{tag: $tag, arch: $arch, digest: $digest}' > "$TAG-$ARCH.json"
       - name: Save tested image digest
         if: env.PUBLISH == 'true'
         uses: actions/upload-artifact@v4

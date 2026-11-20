@@ -41,8 +41,10 @@ with Compose to run it.
 
 ## MongoDB data
 
-New deployments use MongoDB 8.0. The Compose sidecar checks the bind mount
-before opening it with a different MongoDB major version. Existing installations
+New deployments use MongoDB 8.0. Check
+[MongoDB's CPU requirements](https://www.mongodb.com/docs/manual/administration/production-notes/#platform-support-notes)
+for your host. The Compose sidecar guards existing bind mounts when moving to
+a newer major version. Existing installations
 using MongoDB 4.4 can keep running against their current data by adding
 `MONGO_IMAGE=mongo:4.4` to `.env`. MongoDB 4.4 is end-of-life.
 

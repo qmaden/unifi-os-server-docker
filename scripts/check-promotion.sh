@@ -2,16 +2,23 @@
 set -euo pipefail
 
 # The workflow serializes publishing across schedules, pushes, and manual runs.
-# The version stored on the published index also prevents stale runs downgrading it.
+# Read the version label from the amd64 image config. Docker manifest lists do
+# not preserve OCI index-level annotations.
 if manifest=$(docker buildx imagetools inspect --raw "$IMAGE:latest" 2>&1); then
-    published=$(jq -er '.annotations["org.opencontainers.image.version"]
-        | strings | select(test("^[0-9]+\\.[0-9]+\\.[0-9]+$"))' <<< "$manifest") || {
-        echo "The existing latest index lacks a stable version annotation." >&2
+    digest=$(jq -er '
+        [.manifests[] | select(.platform.os == "linux" and .platform.architecture == "amd64")]
+        | if length == 1 then .[0].digest else error("expected one amd64 image") end
+    ' <<< "$manifest")
+    [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
+    published=$(docker buildx imagetools inspect --format '{{json .Image}}' "$IMAGE@$digest" |
+        jq -er '.config.Labels["org.opencontainers.image.version"]
+            | strings | select(test("^[0-9]+\\.[0-9]+\\.[0-9]+$"))') || {
+        echo "The existing latest image lacks a stable version label." >&2
         exit 1
     }
 elif [[ "$manifest" == *"manifest unknown"* || "$manifest" == *"$IMAGE:latest: not found"* ||
-        "$manifest" == *"failed to fetch anonymous token:"*"403 Forbidden"* ]]; then
-    # GHCR returns a denied anonymous pull token before the package exists.
+        "$manifest" == *"ghcr.io/token"*"403 Forbidden"* ]]; then
+    # GHCR can deny a repository-scoped pull token before the package exists.
     # A job with no write access will still be unable to upload an image.
     published=""
 else
