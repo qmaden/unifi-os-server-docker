@@ -1,12 +1,14 @@
 'use strict';
 
-const { spawn } = require('node:child_process');
+const { execFile, spawn } = require('node:child_process');
 const { readdir } = require('node:fs/promises');
 const { setTimeout: sleep } = require('node:timers/promises');
 
 const SCHEMA = 'uos.v1';
 const LEVELS = ['emergency', 'alert', 'critical', 'error', 'warning', 'notice', 'info', 'debug'];
-const PG_LOG = '/var/log/postgresql/postgresql-14-main.log';
+const { promisify } = require('node:util');
+
+const exec = promisify(execFile);
 const MAX_RECORD_BYTES = 1024 * 1024;
 const MONGO_EVENT = Symbol('mongoEvent');
 const MONGO_LEVELS = new Map([['I', 'info'], ['W', 'warning'], ['E', 'error'], ['F', 'fatal']]);
@@ -154,10 +156,10 @@ function journalEvent(record) {
     });
 }
 
-function postgresEvent(message, path = PG_LOG) {
+function postgresEvent(message, path, unit) {
     const event = {
         log_schema: SCHEMA, source: 'file', service: 'postgresql',
-        unit: 'postgresql@14-main.service', file: path,
+        unit, file: path,
         timestamp: new Date().toISOString(), level: 'unknown', message,
     };
     // Debian's default: %m [%p] %q%u@%d, followed by PostgreSQL's severity.
@@ -283,7 +285,19 @@ async function journalFilesExist(roots = ['/run/log/journal', '/var/log/journal'
     return false;
 }
 
-async function forward({ since = `@${Math.floor(Date.now() / 1000)}`, postgresLog = PG_LOG,
+async function postgresLogs() {
+    const { stdout } = await exec('pg_lsclusters', ['--no-header'], { env: { ...process.env, LC_ALL: 'C' } });
+    const clusters = [];
+    for (const line of stdout.split('\n')) {
+        const match = line.match(/^\s*(\d+(?:\.\d+)?)\s+(\S+)(?:\s+\S+){4}\s+(\/.*)$/);
+        if (match) {
+            clusters.push({ path: match[3].trimEnd(), unit: `postgresql@${match[1]}-${match[2]}.service` });
+        }
+    }
+    return clusters;
+}
+
+async function forward({ since = `@${Math.floor(Date.now() / 1000)}`, postgresLog,
     journalReady = journalFilesExist } = {}) {
     let stopping = false;
     let cursor;
@@ -364,16 +378,25 @@ async function forward({ since = `@${Math.floor(Date.now() / 1000)}`, postgresLo
                 }
             })(),
             (async () => {
-                while (!stopping) {
-                    // Replay the current file, including startup failures that
-                    // happened before tail opened it. No ten-line tail limit.
-                    await run('tail', ['--lines', '+1', '--follow=name', '--retry', '--quiet',
-                        '--sleep-interval=0.2', '--max-unchanged-stats=1', postgresLog],
-                    line => emit(postgresEvent(line, postgresLog)));
-                    // If tail itself fails, replay rather than silently lose
-                    // records written while it was down (duplicates possible).
-                    if (!stopping) await sleep(1000);
+                let clusters = postgresLog ? [{ path: postgresLog }] : [];
+                while (!stopping && clusters.length === 0) {
+                    try {
+                        clusters = await postgresLogs();
+                    } catch (error) {
+                        await emit(diagnostic(`PostgreSQL log discovery failed: ${error.message}`, 'warning'));
+                        await sleep(4000);
+                    }
+                    if (clusters.length === 0 && !stopping) await sleep(1000);
                 }
+                await Promise.all(clusters.map(async ({ path, unit }) => {
+                    while (!stopping) {
+                        // Replay startup diagnostics and follow the file through rotation.
+                        await run('tail', ['--lines', '+1', '--follow=name', '--retry', '--quiet',
+                            '--sleep-interval=0.2', '--max-unchanged-stats=1', path],
+                        line => emit(postgresEvent(line, path, unit)));
+                        if (!stopping) await sleep(1000);
+                    }
+                }));
             })(),
         ]);
     } finally {

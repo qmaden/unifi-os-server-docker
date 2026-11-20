@@ -1,7 +1,7 @@
 services:
   unifi-os-server:
     container_name: unifi-os-server
-    image: ghcr.io/unihosted/unifi-os-server-docker:latest
+    image: ${UNIFI_IMAGE:-ghcr.io/qmaden/unifi-os-server-docker:latest}
     cgroup: host
     restart: unless-stopped
     cap_add:
@@ -17,7 +17,6 @@ services:
       - "3478:3478/udp" # STUN used for device poking
       - "5514:5514/udp" # Syslog
       - "6789:6789" # Speed test
-      - "127.0.0.1:5432:5432" # PostgreSQL (localhost only)
     extra_hosts:
       - "host.docker.internal:host-gateway"
       - "host.containers.internal:host-gateway"
@@ -36,20 +35,50 @@ services:
     networks:
       - unifi-os-server-network
     depends_on:
-      - unifi-os-server-mongodb
+      unifi-os-server-mongodb:
+        condition: service_healthy
     environment:
       TZ: Europe/Amsterdam
-      UOS_SYSTEM_IP: "127.0.0.1"
+      UOS_SYSTEM_IP: ${UOS_SYSTEM_IP:-127.0.0.1}
       UOS_LOG_FORMAT: "text" # Default; set to "json" for structured log collectors.
       MONGO_INTERNAL: "false" # Defaults to false → uses the external MongoDB service below.
 
   unifi-os-server-mongodb:
     container_name: unifi-os-server-mongodb
-    image: mongo:4.4
+    image: ${MONGO_IMAGE:-mongo:8.0}
+    restart: unless-stopped
+    environment:
+      MONGO_ACCEPT_EXISTING_DATA: ${MONGO_ACCEPT_EXISTING_DATA:-false}
+    entrypoint:
+      - /bin/bash
+      - -ec
+      - |
+        major=$$(mongod --version | sed -n 's/^db version v\([0-9][0-9]*\).*/\1/p')
+        test -n "$$major"
+        marker="/data/db/.uos-mongo-major-$$major"
+        if [ "$$major" != 4 ] && [ ! -e "$$marker" ]; then
+          if [ -n "$$(find /data/db -mindepth 1 -maxdepth 1 -print -quit)" ] &&
+              [ "$$MONGO_ACCEPT_EXISTING_DATA" != true ]; then
+            echo 'Existing MongoDB data detected. See docs/building.md before changing major versions.' >&2
+            exit 1
+          fi
+          touch "$$marker"
+        fi
+        exec /usr/local/bin/docker-entrypoint.sh mongod
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          if command -v mongosh >/dev/null; then shell=mongosh; else shell=mongo; fi;
+          "$$shell" --quiet --eval 'quit(db.adminCommand({ping: 1}).ok === 1 ? 0 : 1)'
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
     networks:
       - unifi-os-server-network
     volumes:
-      - ./docker/mongodb:/data/db
+      - ${MONGO_DATA_DIR:-./docker/mongodb}:/data/db
 
 networks:
   unifi-os-server-network:

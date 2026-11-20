@@ -196,33 +196,41 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 6. PostgreSQL — expose on all interfaces for Docker port mapping
+# 6. PostgreSQL — keep TCP local unless explicitly enabled
 # ---------------------------------------------------------------------------
 
-# listen_addresses requires a restart (reload is not enough).
-(
-    PG_CONF="/etc/postgresql/14/main/postgresql.conf"
-    PG_HBA="/etc/postgresql/14/main/pg_hba.conf"
+case "${UOS_POSTGRES_TCP:-false}" in
+    true) PG_LISTEN='*' ;;
+    false) PG_LISTEN='localhost' ;;
+    *) log "ERROR: UOS_POSTGRES_TCP must be true or false"; exit 1 ;;
+esac
 
-    log "PostgreSQL exposure worker started"
-    while [ ! -f "$PG_CONF" ]; do sleep 5; done
-
-    if grep -q "^#\?listen_addresses" "$PG_CONF"; then
-        sed -i "s/^#\?listen_addresses.*/listen_addresses = '*' /" "$PG_CONF"
-    else
-        echo "listen_addresses = '*'" >> "$PG_CONF"
+if ! PG_CLUSTERS=$(pg_lsclusters --no-header); then
+    log "ERROR: Could not discover PostgreSQL clusters"
+    exit 1
+fi
+while read -r version cluster _; do
+    [ -n "$version" ] || continue
+    if ! pg_conftool "$version" "$cluster" set listen_addresses "$PG_LISTEN"; then
+        log "ERROR: Could not configure PostgreSQL $version/$cluster"
+        exit 1
     fi
-
-    if ! grep -q "^host all all 0.0.0.0/0" "$PG_HBA" 2>/dev/null; then
-        echo "host all all 0.0.0.0/0 trust" >> "$PG_HBA"
+    PG_HBA="/etc/postgresql/$version/$cluster/pg_hba.conf"
+    if ! sed -i '/^# uos-container-tcp$/,+2d' "$PG_HBA"; then
+        log "ERROR: Could not update PostgreSQL host authentication"
+        exit 1
     fi
-
-    # Wait for systemd to be up, then restart PostgreSQL to pick up listen_addresses
-    while ! systemctl is-system-running 2>/dev/null | grep -qE "running|degraded"; do sleep 2; done
-    systemctl restart postgresql@14-main 2>/dev/null || systemctl restart postgresql 2>/dev/null || true
-
-    log "PostgreSQL: exposed on port 5432"
-) &
+    if [ "$PG_LISTEN" = '*' ]; then
+        # Put password rules first so a later upstream trust rule cannot win.
+        if ! sed -i '1i\# uos-container-tcp\nhost all all 0.0.0.0/0 scram-sha-256\nhost all all ::/0 scram-sha-256' "$PG_HBA"; then
+            log "ERROR: Could not require PostgreSQL TCP authentication"
+            exit 1
+        fi
+    fi
+done <<< "$PG_CLUSTERS"
+if [ "$PG_LISTEN" = '*' ]; then
+    log "PostgreSQL TCP enabled with SCRAM authentication"
+fi
 
 # ---------------------------------------------------------------------------
 # 7. Journal forwarding & systemd
